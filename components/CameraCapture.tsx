@@ -21,6 +21,7 @@ export function CameraCapture({ onCapture }: CameraCaptureProps) {
   const stop = useCallback(() => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
   }, []);
 
   useEffect(() => stop, [stop]);
@@ -52,16 +53,33 @@ export function CameraCapture({ onCapture }: CameraCaptureProps) {
         });
       }
       streamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
-      }
+      // Move to streaming phase so the <video> element mounts; the effect
+      // below attaches the srcObject once the ref is populated.
       setPhase("streaming");
     } catch (err) {
       console.warn("getUserMedia denied", err);
       setPhase("denied");
     }
   }, []);
+
+  // Attach the stream once the <video> element is actually in the DOM.
+  useEffect(() => {
+    if (phase !== "streaming") return;
+    const video = videoRef.current;
+    const stream = streamRef.current;
+    if (!video || !stream) return;
+    if (video.srcObject !== stream) video.srcObject = stream;
+    const tryPlay = () => {
+      video.play().catch((err) => {
+        console.warn("video.play() failed", err);
+      });
+    };
+    if (video.readyState >= 1) {
+      tryPlay();
+    } else {
+      video.addEventListener("loadedmetadata", tryPlay, { once: true });
+    }
+  }, [phase]);
 
   const snap = useCallback(() => {
     const video = videoRef.current;
