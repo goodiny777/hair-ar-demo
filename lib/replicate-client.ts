@@ -108,14 +108,23 @@ async function runHairClip(input: HairTransferInput): Promise<HairTransferResult
   return { imageUrl: firstUrl(output), model: "hairclip" };
 }
 
+function isAccountLevelError(err: unknown): boolean {
+  // 401 invalid token, 402 out of credit, 403 forbidden — all apply to every
+  // model on the account, so the fallback cannot help.
+  const status = (err as { response?: { status?: number } })?.response?.status;
+  return status === 401 || status === 402 || status === 403;
+}
+
 /**
  * Generate the hair-transfer preview. Tries FLUX first (best quality),
- * falls back to HairCLIP on failure (cheaper, less accurate).
+ * falls back to HairCLIP on failure (cheaper, less accurate). Skips the
+ * fallback on account-level errors where both models would fail identically.
  */
 export async function generateHairstyle(input: HairTransferInput): Promise<HairTransferResult> {
   try {
     return await runFlux(input);
   } catch (err) {
+    if (isAccountLevelError(err)) throw err;
     console.warn("[replicate] FLUX failed, falling back to HairCLIP:", err);
     return await runHairClip(input);
   }

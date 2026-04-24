@@ -46,6 +46,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(result);
   } catch (err) {
     console.error("[hair-transfer] generation failed:", err);
+    const upstreamStatus = (err as { response?: { status?: number } })?.response?.status;
+    if (upstreamStatus === 402) {
+      return NextResponse.json(
+        {
+          error:
+            "На Replicate-аккаунте закончился баланс. Пополните его на https://replicate.com/account/billing",
+        },
+        { status: 402 },
+      );
+    }
+    if (upstreamStatus === 401) {
+      return NextResponse.json(
+        { error: "Replicate token is invalid or revoked." },
+        { status: 401 },
+      );
+    }
     const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json({ error: message }, { status: 502 });
   }
