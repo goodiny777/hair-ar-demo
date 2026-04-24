@@ -11,11 +11,13 @@ import { HairRecolor } from "@/components/HairRecolor";
 import { StyleGallery } from "@/components/StyleGallery";
 import { BeforeAfterSlider } from "@/components/BeforeAfterSlider";
 import { Button } from "@/components/ui/Button";
+import { SegmentedControl } from "@/components/ui/SegmentedControl";
 import {
   getRecommendations,
   STYLE_PRESETS,
   type FluxColor,
 } from "@/lib/recommendations";
+import { type Gender } from "@/lib/gender-detection";
 
 type Step =
   | "intro"
@@ -31,6 +33,7 @@ export default function Home() {
   const [analysis, setAnalysis] = useState<FaceAnalysisResult | null>(null);
   const [selectedStyleId, setSelectedStyleId] = useState<string | null>(null);
   const [selectedColor, setSelectedColor] = useState<FluxColor | null>(null);
+  const [selectedGender, setSelectedGender] = useState<Gender | null>(null);
   const [generatedUrl, setGeneratedUrl] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -39,6 +42,7 @@ export default function Home() {
     setAnalysis(null);
     setSelectedStyleId(null);
     setSelectedColor(null);
+    setSelectedGender(null);
     setGeneratedUrl(null);
     setErrorMsg(null);
     setStep("camera");
@@ -60,6 +64,7 @@ export default function Home() {
           image: imageDataUrl,
           haircut: preset.haircut,
           hair_color: selectedColor ?? preset.defaultColor,
+          gender: selectedGender ?? "none",
         }),
       });
       if (!res.ok) {
@@ -128,6 +133,7 @@ export default function Home() {
             imageDataUrl={imageDataUrl}
             onComplete={(result) => {
               setAnalysis(result);
+              setSelectedGender(result.gender);
               setStep("style");
             }}
             onError={(msg) => {
@@ -142,6 +148,23 @@ export default function Home() {
         <section className="flex-1 w-full flex flex-col items-center gap-6">
           <AnalysisResultCard result={analysis} />
 
+          <div className="w-full max-w-md flex items-center justify-between">
+            <div className="text-sm text-zinc-600">Подбор под</div>
+            <SegmentedControl<Gender>
+              options={[
+                { value: "female", label: "Женщина" },
+                { value: "male", label: "Мужчина" },
+              ]}
+              value={selectedGender ?? analysis.gender}
+              onChange={(g) => {
+                setSelectedGender(g);
+                // Selected style/color belongs to the old gender list — clear.
+                setSelectedStyleId(null);
+                setSelectedColor(null);
+              }}
+            />
+          </div>
+
           <details className="w-full max-w-md">
             <summary className="text-sm text-zinc-500 cursor-pointer">
               Попробовать цвет прямо на фото (без генерации)
@@ -152,7 +175,7 @@ export default function Home() {
           </details>
 
           <StyleGallery
-            styles={getRecommendations(analysis.shape)}
+            styles={getRecommendations(analysis.shape, selectedGender ?? analysis.gender)}
             selectedStyleId={selectedStyleId}
             selectedColor={selectedColor}
             onSelectStyle={(id) => {

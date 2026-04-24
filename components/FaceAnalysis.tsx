@@ -18,11 +18,13 @@ import {
   HAIR_LENGTH_LABEL_RU,
   type HairLength,
 } from "@/lib/hair-length";
+import { detectGender, GENDER_LABEL_RU, type Gender } from "@/lib/gender-detection";
 
 export type FaceAnalysisResult = {
   shape: FaceShape;
   hairColor: HairColorBucket;
   hairLength: HairLength;
+  gender: Gender;
 };
 
 type FaceAnalysisProps = {
@@ -121,11 +123,13 @@ export function FaceAnalysis({ imageDataUrl, onComplete, onError }: FaceAnalysis
           MASK_VALUE,
         );
 
+        const gender = detectGender(maskData, width, height, landmarks, MASK_VALUE);
+
         categoryMask.close();
 
         if (cancelledRef.current) return;
         setStage("done");
-        onComplete({ shape, hairColor, hairLength });
+        onComplete({ shape, hairColor, hairLength, gender });
       } catch (err) {
         console.error(err);
         if (cancelledRef.current) return;
@@ -168,10 +172,14 @@ export function AnalysisResultCard({
 }) {
   return (
     <div className="bg-white rounded-2xl p-4 border border-zinc-200 w-full max-w-md">
-      <div className="grid grid-cols-3 gap-3 text-sm">
+      <div className="grid grid-cols-4 gap-3 text-sm">
         <div>
           <div className="text-zinc-500 text-xs uppercase">Форма</div>
           <div className="font-medium">{FACE_SHAPE_LABEL_RU[result.shape]}</div>
+        </div>
+        <div>
+          <div className="text-zinc-500 text-xs uppercase">Пол</div>
+          <div className="font-medium">{GENDER_LABEL_RU[result.gender]}</div>
         </div>
         <div>
           <div className="text-zinc-500 text-xs uppercase">Длина</div>

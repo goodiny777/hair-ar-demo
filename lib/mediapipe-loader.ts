@@ -59,8 +59,11 @@ export async function getHairSegmenter(): Promise<ImageSegmenter> {
       ImageSegmenter.createFromOptions(vision, {
         baseOptions: { modelAssetPath: HAIR_SEGMENTER_MODEL, delegate },
         runningMode: "IMAGE",
+        // Category mask = binary class map, used for gender heuristic & length.
+        // Confidence masks = per-class float probabilities, used for the recolor
+        // so we can feather the hairline instead of getting a jagged edge.
         outputCategoryMask: true,
-        outputConfidenceMasks: false,
+        outputConfidenceMasks: true,
       }),
     );
   })();

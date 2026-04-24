@@ -9,7 +9,8 @@ type HairRecolorProps = {
 };
 
 type MaskState = {
-  mask: Uint8Array;
+  /** Confidence per mask-resolution pixel, already smoothed and thresholded. */
+  alpha: Float32Array;
   width: number;
   height: number;
 };
@@ -36,17 +37,13 @@ export function HairRecolor({ imageDataUrl }: HairRecolorProps) {
       const segmenter = await getHairSegmenter();
       if (cancelled) return;
       const segResult = segmenter.segment(img);
-      const categoryMask = segResult.categoryMask;
-      if (!categoryMask) {
+
+      const alpha = extractHairAlpha(segResult);
+      if (!alpha) {
         console.warn("No hair mask available");
         return;
       }
-      maskRef.current = {
-        mask: categoryMask.getAsUint8Array(),
-        width: categoryMask.width,
-        height: categoryMask.height,
-      };
-      categoryMask.close();
+      maskRef.current = alpha;
       drawOriginal();
       setReady(true);
     }
@@ -76,33 +73,42 @@ export function HairRecolor({ imageDataUrl }: HairRecolorProps) {
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const pixels = imageData.data;
     const [tr, tg, tb] = hexToRgb(hex);
+    const [, ts, tl] = rgbToHsl(tr, tg, tb);
+    const th = rgbToHsl(tr, tg, tb)[0];
 
-    // Mask may be a different resolution than canvas — rescale with nearest-neighbor.
     const maskW = maskState.width;
     const maskH = maskState.height;
-    const mask = maskState.mask;
-    const MASK_VALUE = 1;
+    const alpha = maskState.alpha;
 
     const scaleX = maskW / canvas.width;
     const scaleY = maskH / canvas.height;
 
     for (let y = 0; y < canvas.height; y++) {
-      const maskY = Math.min(maskH - 1, (y * scaleY) | 0);
+      const my = (y * scaleY) | 0;
+      const clampedMy = my < maskH ? my : maskH - 1;
       for (let x = 0; x < canvas.width; x++) {
-        const maskX = Math.min(maskW - 1, (x * scaleX) | 0);
-        if (mask[maskY * maskW + maskX] !== MASK_VALUE) continue;
+        const mx = (x * scaleX) | 0;
+        const clampedMx = mx < maskW ? mx : maskW - 1;
+        const a = alpha[clampedMy * maskW + clampedMx];
+        if (a <= 0) continue;
+
         const p = (y * canvas.width + x) * 4;
         const r = pixels[p];
         const g = pixels[p + 1];
         const b = pixels[p + 2];
-        // Preserve original lightness by using it as a multiplier on the target color.
-        // L = 0.299r + 0.587g + 0.114b  (Rec.601 luma)
-        const luma = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-        // Blend: 40% target base + 60% tinted-by-luma. Gives natural-looking dye rather than flat paint.
-        const blend = 0.75;
-        pixels[p] = clamp(tr * luma * blend + r * (1 - blend));
-        pixels[p + 1] = clamp(tg * luma * blend + g * (1 - blend));
-        pixels[p + 2] = clamp(tb * luma * blend + b * (1 - blend));
+        const [, ss, sl] = rgbToHsl(r, g, b);
+
+        // Stay in HSL: take the target hue, blend saturation, and KEEP source
+        // lightness so strand-level shading survives. Give very dark pixels a
+        // small lift so jet-black doesn't swallow bright target colors.
+        const newH = th;
+        const newS = Math.min(1, ts * 0.85 + ss * 0.15);
+        const newL = sl < 0.18 ? sl + (tl - sl) * 0.35 : sl;
+
+        const [nr, ng, nb] = hslToRgb(newH, newS, newL);
+        pixels[p] = clamp(r * (1 - a) + nr * a);
+        pixels[p + 1] = clamp(g * (1 - a) + ng * a);
+        pixels[p + 2] = clamp(b * (1 - a) + nb * a);
       }
     }
 
@@ -159,6 +165,121 @@ export function HairRecolor({ imageDataUrl }: HairRecolorProps) {
   );
 }
 
+// ── helpers ────────────────────────────────────────────────────────────
+
+type SegmentationResultLike = {
+  categoryMask?: { width: number; height: number; getAsUint8Array: () => Uint8Array; close: () => void } | null;
+  confidenceMasks?: Array<{
+    width: number;
+    height: number;
+    getAsFloat32Array: () => Float32Array;
+    close: () => void;
+  }> | null;
+};
+
+/**
+ * Extracts a smooth, eroded alpha mask for the "hair" class.
+ *
+ * We prefer confidence masks (float probabilities) because the binary category
+ * mask gives a jagged hairline that visibly stains skin on the other side of
+ * the boundary. Steps:
+ *   1. Find the mask closest to "hair". For 2-class segmenters (bg/hair) this
+ *      is typically index 1, but some model versions return a single mask.
+ *   2. Apply a steep smoothstep so only high-confidence pixels paint, and the
+ *      transition between 0 and 1 happens over a narrow band (→ soft edge,
+ *      not blocky and not smeared).
+ *   3. 3×3 box blur for sub-pixel feather at the edge.
+ */
+function extractHairAlpha(segResult: unknown): MaskState | null {
+  const r = segResult as SegmentationResultLike;
+  const confidenceMasks = r.confidenceMasks;
+
+  let raw: Float32Array | null = null;
+  let width = 0;
+  let height = 0;
+
+  if (confidenceMasks && confidenceMasks.length > 0) {
+    // For a 2-class model, index 1 == hair. If there's only one mask it's
+    // the foreground (hair) probability already.
+    const idx = confidenceMasks.length > 1 ? 1 : 0;
+    const m = confidenceMasks[idx];
+    raw = m.getAsFloat32Array();
+    width = m.width;
+    height = m.height;
+    for (const mm of confidenceMasks) mm.close();
+  } else if (r.categoryMask) {
+    // Fallback: use binary mask as 0/1 floats.
+    const cm = r.categoryMask;
+    const u8 = cm.getAsUint8Array();
+    raw = new Float32Array(u8.length);
+    for (let i = 0; i < u8.length; i++) raw[i] = u8[i] === 1 ? 1 : 0;
+    width = cm.width;
+    height = cm.height;
+    cm.close();
+  }
+
+  if (!raw) return null;
+
+  // Smoothstep threshold. Pixels below LOW are zeroed (so skin at the
+  // hairline stays untouched); above HIGH go fully opaque; in between is the
+  // soft transition.
+  const LOW = 0.55;
+  const HIGH = 0.92;
+  const range = HIGH - LOW;
+  const stepped = new Float32Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    const v = raw[i];
+    if (v <= LOW) {
+      stepped[i] = 0;
+    } else if (v >= HIGH) {
+      stepped[i] = 1;
+    } else {
+      const t = (v - LOW) / range;
+      // Cubic smoothstep: 3t² − 2t³
+      stepped[i] = t * t * (3 - 2 * t);
+    }
+  }
+
+  // Small box blur — 3×3, two passes — for sub-pixel feathering.
+  const blurred = boxBlur(boxBlur(stepped, width, height, 1), width, height, 1);
+
+  return { alpha: blurred, width, height };
+}
+
+function boxBlur(src: Float32Array, w: number, h: number, radius: number): Float32Array {
+  const out = new Float32Array(src.length);
+  // Horizontal
+  const tmp = new Float32Array(src.length);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      let count = 0;
+      for (let dx = -radius; dx <= radius; dx++) {
+        const sx = x + dx;
+        if (sx < 0 || sx >= w) continue;
+        sum += src[y * w + sx];
+        count++;
+      }
+      tmp[y * w + x] = count > 0 ? sum / count : 0;
+    }
+  }
+  // Vertical
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0;
+      let count = 0;
+      for (let dy = -radius; dy <= radius; dy++) {
+        const sy = y + dy;
+        if (sy < 0 || sy >= h) continue;
+        sum += tmp[sy * w + x];
+        count++;
+      }
+      out[y * w + x] = count > 0 ? sum / count : 0;
+    }
+  }
+  return out;
+}
+
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -176,6 +297,51 @@ function hexToRgb(hex: string): [number, number, number] {
     parseInt(h.substring(2, 4), 16),
     parseInt(h.substring(4, 6), 16),
   ];
+}
+
+function rgbToHsl(r: number, g: number, b: number): [number, number, number] {
+  const R = r / 255;
+  const G = g / 255;
+  const B = b / 255;
+  const max = Math.max(R, G, B);
+  const min = Math.min(R, G, B);
+  const l = (max + min) / 2;
+  let h = 0;
+  let s = 0;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case R:
+        h = (G - B) / d + (G < B ? 6 : 0);
+        break;
+      case G:
+        h = (B - R) / d + 2;
+        break;
+      case B:
+        h = (R - G) / d + 4;
+        break;
+    }
+    h *= 60;
+  }
+  return [h, s, l];
+}
+
+function hslToRgb(h: number, s: number, l: number): [number, number, number] {
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hh = h / 60;
+  const x = c * (1 - Math.abs((hh % 2) - 1));
+  let r1 = 0;
+  let g1 = 0;
+  let b1 = 0;
+  if (hh < 1) [r1, g1, b1] = [c, x, 0];
+  else if (hh < 2) [r1, g1, b1] = [x, c, 0];
+  else if (hh < 3) [r1, g1, b1] = [0, c, x];
+  else if (hh < 4) [r1, g1, b1] = [0, x, c];
+  else if (hh < 5) [r1, g1, b1] = [x, 0, c];
+  else [r1, g1, b1] = [c, 0, x];
+  const m = l - c / 2;
+  return [Math.round((r1 + m) * 255), Math.round((g1 + m) * 255), Math.round((b1 + m) * 255)];
 }
 
 function clamp(v: number): number {
